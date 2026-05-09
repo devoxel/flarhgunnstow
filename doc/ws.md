@@ -1,57 +1,48 @@
-# websocket api 
+# WebSocket API
 
-On connection server should wait for StatusCheck message. Then
-the server should report a status and write the password required
-if that status is "Unverified".
+On connection the server waits for a `StatusCheck` message. If the session is valid, the server
+returns a `StatusCheckResponse` with the full Music UI state — playlists, now-playing track, and the
+current queue. If the session is invalid (e.g. expired or wrong ID), the server returns an
+`Unverified` status.
 
-If the status is Verified then the server should return a Music UI
-state - a list of playlists to render on the UI to be selected by the
-user. If a user clicks on a playlist, the client should send a MusicSelect
-message, which prompts the bot to start playing music.
+## Planned: Push-Based Updates
+
+Currently the client polls with `StatusCheck` every 600ms. The plan is to move to push-based updates
+where the server sends `StatusCheckResponse`-equivalent messages whenever state changes, and the client
+only sends `StatusCheck` as a periodic heartbeat/health-check (~every 30s).
+
+## Planned: Multi-User Identity
+
+When multi-user identity is implemented, the initial handshake will include a user display name or token
+so the server can attribute queue additions and enforce permissions (skip voting, balanced queue, etc.).
 
 ## StatusCheck (sent by client) Ask the server for a status
 
 ### Request
 
-{
-       "message": "StatusCheck",
-}
+```yaml
+{ "message": "StatusCheck", }
+```
 
 ### Responses
 
-{
-       "message": "StatusCheckResponse",
-       "status": "Verified"
-       "playlists": []string{}...
-       "nowPlaying": {
-               "playlist": "https://.../",
-               "song": "Living La Vida Loca",
-       },
-},
-{
-       "message": "StatusCheckResponse",
-       "status": "Unverified"
-       "password": "123123",
-}
-
+```yaml
+{ "message": "StatusCheckResponse",
+  "status": "Verified",
+  "playlists": [],
+  "nowPlaying": { "playlist": "https://.../", "song": "Living La Vida Loca", },
+} // or 
+{ "message": "StatusCheckResponse", "status": "Unverified"}
+```
 
 ## Music Selection
 
 ### Request
 
-{
-       "message": "MusicSelect",
-       "type": "Playlist",
-       "playlist": "https://.../",
-}
+```
+{ "message": "MusicSelect", "type": "Playlist", "playlist": "https://.../", }
 
-{
-       "message": "MusicSelect",
-       "type": "SkipSong",
-}
+{ "message": "MusicSelect", "type": "SkipSong", }
 
-{
-       "message": "MusicSelect",
-       "type": "SetSong",
-       "song": "",
-}
+{ "message": "MusicSelect", "type": "SetSong", "song": "", }
+```

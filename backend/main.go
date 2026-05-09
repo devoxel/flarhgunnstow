@@ -1,12 +1,12 @@
 package main
 
+import "C"
+
 import (
-	"errors"
+	"context"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,8 +14,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
 	"github.com/devoxel/dndmusic/spotify"
+	"github.com/disgoorg/disgo"
+	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/cache"
+	"github.com/disgoorg/disgo/gateway"
+	"github.com/disgoorg/disgo/voice"
+	"github.com/disgoorg/godave/golibdave"
 )
 
 var (
@@ -27,6 +32,7 @@ var (
 	videoDir      string
 	workingDir    string
 	siteURL       string
+	debugMode     bool
 )
 
 func init() {
@@ -38,50 +44,59 @@ func init() {
 	flag.StringVar(&workingDir, "working-dir", ".", "working-directory")
 	flag.IntVar(&port, "p", 8080, "port to run the discord bot")
 	flag.StringVar(&runningDir, "d", "", "running directory")
-}
-
-func validatePassword(pw string) error {
-	if len(pw) < 4 {
-		return errors.New("session password should be longer than four characters")
-	}
-	if len(pw) > 32 {
-		return errors.New("session password can not be longer than 32 characters")
-	}
-	return nil
+	flag.BoolVar(&debugMode, "debug", false, "disable xss checks + print more debug")
 }
 
 func validateWorkingDir() {
-	_, err := ioutil.ReadFile(workingDir + "/cookies.txt")
+	_, err := os.ReadFile(workingDir + "/cookies.txt")
 	if err != nil {
-		log.Fatal("no cookies file in working dir")
+		log.Println("warning: no cookies.txt in working dir — youtube-dl downloads will not work (local files still OK)")
 	}
 }
 
-func initBot(ongoingSessions *SessionManager) *discordgo.Session {
-	dg, err := discordgo.New("Bot " + token)
+func initBot(ongoingSessions *SessionManager) *bot.Client {
+	b := &DiscordBot{ongoingSessions}
+
+	client, err := disgo.New(token,
+		bot.WithGatewayConfigOpts(
+			gateway.WithIntents(
+				gateway.IntentGuilds,
+				gateway.IntentGuildMessages,
+				gateway.IntentGuildVoiceStates,
+				gateway.IntentMessageContent,
+			),
+		),
+		bot.WithEventListenerFunc(b.incomingMessage),
+		bot.WithCacheConfigOpts(
+			cache.WithCaches(cache.FlagVoiceStates),
+		),
+		bot.WithVoiceManagerConfigOpts(
+			voice.WithDaveSessionCreateFunc(golibdave.NewSession),
+		),
+	)
 	if err != nil {
-		log.Fatal("cannot init discord bot", err)
+		log.Fatal("cannot init discord bot: ", err)
 	}
 
-	// dg.LogLevel = discordgo.LogDebug
-	s := &DiscordBot{ongoingSessions}
-	dg.AddHandler(s.incomingMessage)
-
-	if err = dg.Open(); err != nil {
-		log.Fatal("cannot init websocket: ", err)
+	if err = client.OpenGateway(context.TODO()); err != nil {
+		log.Fatal("cannot connect to discord gateway: ", err)
 	}
 
-	return dg
+	return client
 }
+
 func initADM() {
-	// XXX: dirty global
 	adm = &AudioDownloadManager{
 		playlistCache: map[string][]string{},
 		s:             &spotify.Client{ClientID: spotifyID, ClientSecret: spotifySecret},
 	}
 
-	if err := adm.s.Authorize(); err != nil {
-		log.Fatalf("cannot init spotify client: %v", err)
+	if spotifyID != "" && spotifySecret != "" {
+		if err := adm.s.Authorize(); err != nil {
+			log.Fatalf("cannot init spotify client: %v", err)
+		}
+	} else {
+		log.Println("no spotify credentials provided, skipping spotify init")
 	}
 
 	if err := adm.readCache(); err != nil {
@@ -91,15 +106,13 @@ func initADM() {
 
 func main() {
 	flag.Parse()
-
 	validateWorkingDir()
-	rand.Seed(time.Now().Unix())
 
-	log.Println("starting bot ...") // XXX: Debug
+	log.Println("starting bot ...")
 
 	initADM()
 
-	log.Println("adm started ...") // XXX: Debug
+	log.Println("adm started ...")
 
 	if token == "" {
 		log.Fatal("no token provided")
@@ -114,14 +127,16 @@ func main() {
 		guildLookup: sync.Map{},
 	}
 
-	dg := initBot(ongoingSessions)
+	client := initBot(ongoingSessions)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		client.Close(ctx)
+	}()
 
-	log.Println("discord initalized ...") // XXX: Debug
+	log.Println("discord initialized ...")
 	handlerInit(ongoingSessions)
-
 	initSample()
-
-	sc := make(chan os.Signal, 1)
 
 	go func() {
 		log.Printf("hosting web server on port: %v ...", port)
@@ -130,8 +145,7 @@ func main() {
 		}
 	}()
 
-	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)
+	sc := make(chan os.Signal, 1)
+	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, syscall.SIGTERM)
 	<-sc
-
-	dg.Close()
 }

@@ -1,167 +1,138 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/disgo/voice"
+	"github.com/disgoorg/snowflake/v2"
 )
-
-type discordSession interface {
-	ChannelMessageSend(channelID string, content string) (*discordgo.Message, error)
-}
 
 type DiscordBot struct {
 	sessions *SessionManager
 }
 
-// Have to wrap the function to allow us to use an interface
-func (s *DiscordBot) incomingMessage(ds *discordgo.Session, m *discordgo.MessageCreate) {
-	s.handleMessage(ds, m)
+func (s *DiscordBot) incomingMessage(e *events.MessageCreate) {
+	s.handleMessage(e)
 }
 
-func (s *DiscordBot) handleMessage(ds *discordgo.Session, m *discordgo.MessageCreate) {
+func (s *DiscordBot) handleMessage(e *events.MessageCreate) {
 	const prefix = ";"
 
-	if !strings.HasPrefix(m.Content, prefix) {
+	if !strings.HasPrefix(e.Message.Content, prefix) {
 		return
 	}
 
-	cmd := strings.Fields(strings.TrimPrefix(m.Content, prefix))
-	for i, c := range cmd {
-		if i == 0 {
-			cmd[i] = strings.ToLower(cmd[i])
-		}
-		cmd[i] = strings.TrimSpace(c)
+	// Ignore DMs
+	if e.GuildID == nil {
+		return
 	}
 
+	cmd := strings.Fields(strings.TrimPrefix(e.Message.Content, prefix))
 	if len(cmd) == 0 {
 		return
 	}
+	cmd[0] = strings.ToLower(cmd[0])
 
 	switch cmd[0] {
 	case "create", "start":
-		s.handleCreate(ds, m)
+		s.handleCreate(e)
 	case "stop":
-		s.handleStop(ds, m)
+		s.handleStop(e)
 	case "q", "queue":
-		s.handleQueue(ds, m)
+		s.handleQueue(e)
 	case "play", "p":
-		s.handlePlay(ds, m, strings.Join(cmd[1:], " "))
+		s.handlePlay(e, strings.Join(cmd[1:], " "))
 	case "skip", "s":
-		s.handleSkip(ds, m)
+		s.handleSkip(e)
 	case "add_playlist":
-		if len(cmd) > 1 {
-			// TODO: handle spotify playlist download
-			s.sendErrorMsg(ds, m, errors.New("remind devoxel to implement this"))
+		if len(cmd) < 2 {
+			s.sendErrorMsg(e, errors.New("remind devoxel to implement this"))
 			return
 		}
-		name := cmd[1]
-		category := "misc"
-		s.handleAdd(ds, m, name, category, []Track{})
+		s.handleAdd(e, cmd[1], "misc", []Track{})
 	case "delete_playlist":
-		name := cmd[1]
-		s.handleDelete(ds, m, name)
+		if len(cmd) < 2 {
+			return
+		}
+		s.handleDelete(e, cmd[1])
 	}
 }
 
-func (s *DiscordBot) handlePlay(ds *discordgo.Session, m *discordgo.MessageCreate, search string) {
-	gs, _, err := s.getOrCreateSession(ds, m)
+func (s *DiscordBot) handlePlay(e *events.MessageCreate, search string) {
+	gs, _, err := s.getOrCreateSession(e)
 	if err != nil {
-		s.sendErrorMsg(ds, m, err)
+		s.sendErrorMsg(e, err)
 		return
 	}
 
 	track, err := gs.QueueSingle(search)
 	if err != nil {
-		s.sendErrorMsg(ds, m, err)
+		s.sendErrorMsg(e, err)
 		return
 	}
 
-	msg := &discordgo.MessageSend{
-		Embed: &discordgo.MessageEmbed{
-			Color: 3447003,
-			Fields: []*discordgo.MessageEmbedField{{
-				Name:  "Queued",
-				Value: fmt.Sprintf("[%s](%s)", track.Name, track.URL),
-			}},
-		},
-	}
-
-	if _, err = ds.ChannelMessageSendComplex(m.ChannelID, msg); err != nil {
-		log.Println("handlePlay: %v", err)
+	msg := discord.NewMessageCreate().WithEmbeds(
+		discord.NewEmbed().
+			WithColor(3447003).
+			AddField("Queued", track.Name, false),
+	)
+	if _, err = e.Client().Rest.CreateMessage(e.ChannelID, msg); err != nil {
+		log.Printf("handlePlay: %v", err)
 	}
 }
 
-func (s *DiscordBot) handleAdd(ds *discordgo.Session, m *discordgo.MessageCreate, name, category string, tracks []Track) {
-	gs, err := s.sessions.FromGuild(m.GuildID)
+func (s *DiscordBot) handleAdd(e *events.MessageCreate, name, category string, tracks []Track) {
+	gs, err := s.sessions.FromGuild(e.GuildID.String())
 	if err != nil {
-		s.sendErrorMsg(ds, m, err)
+		s.sendErrorMsg(e, err)
 		return
 	}
 
 	pl, err := NewPlaylist(name, category, tracks)
 	if err != nil {
-		s.sendErrorMsg(ds, m, err)
+		s.sendErrorMsg(e, err)
 		return
-
 	}
 
 	if err := gs.AddPlaylist(pl); err != nil {
-		s.sendErrorMsg(ds, m, err)
-		return
+		s.sendErrorMsg(e, err)
 	}
 }
 
-func (s *DiscordBot) handleDelete(ds *discordgo.Session, m *discordgo.MessageCreate, name string) {
-	/*
-		gs, err := s.sessions.FromGuild(m.GuildID)
-		if err != nil {
-			s.sendErrorMsg(ds, m, err)
-			return
-		}
-		if err := gs.RemovePlaylist(pl); err != nil {
-			s.sendErrorMsg(ds, m, err)
-			return
-		}
-	*/
+func (s *DiscordBot) handleDelete(e *events.MessageCreate, name string) {
+	// TODO: implement
 }
 
-func (s *DiscordBot) sendErrorMsg(ds discordSession, m *discordgo.MessageCreate, err error) {
+func (s *DiscordBot) sendErrorMsg(e *events.MessageCreate, err error) {
 	log.Printf("sending err: %v", err)
-	_, sErr := ds.ChannelMessageSend(m.ChannelID, err.Error())
-	if sErr != nil {
+	msg := discord.NewMessageCreate().WithContent(err.Error())
+	if _, sErr := e.Client().Rest.CreateMessage(e.ChannelID, msg); sErr != nil {
 		log.Printf("cannot send error message: %v", sErr)
 	}
 }
 
-func (s *DiscordBot) getSenderCID(ds *discordgo.Session, guildID, authorID string) (string, error) {
-	// Find the guild for that channel.
-	g, err := ds.State.Guild(guildID)
-	if err != nil {
-		// Could not find guild.
-		return "", err
+func (s *DiscordBot) getSenderVoiceChannel(e *events.MessageCreate) (snowflake.ID, error) {
+	vs, ok := e.Client().Caches.VoiceState(*e.GuildID, e.Message.Author.ID)
+	if !ok || vs.ChannelID == nil {
+		return 0, errors.New("you must be in a voice channel")
 	}
-
-	// Look for the message sender in that guild's current voice states.
-	for _, vs := range g.VoiceStates {
-		if vs.UserID == authorID {
-			return vs.ChannelID, nil
-		}
-	}
-	return "", errors.New("You can't create a session if you're not in a voice channel")
+	return *vs.ChannelID, nil
 }
 
-func (s *DiscordBot) handleQueue(ds *discordgo.Session, m *discordgo.MessageCreate) {
-	gs, err := s.sessions.FromGuild(m.GuildID)
+func (s *DiscordBot) handleQueue(e *events.MessageCreate) {
+	gs, err := s.sessions.FromGuild(e.GuildID.String())
 	if err == ErrSessionDoesNotExist {
-		// TODO: would be nice to actually check and log these errors everywhere
-		ds.ChannelMessageSend(m.ChannelID, "i'm not playing anything")
+		s.sendMsg(e, "i'm not playing anything")
 		return
 	} else if err != nil {
-		s.sendErrorMsg(ds, m, err)
+		s.sendErrorMsg(e, err)
 		return
 	}
 
@@ -171,86 +142,81 @@ func (s *DiscordBot) handleQueue(ds *discordgo.Session, m *discordgo.MessageCrea
 		if t.Equal(playing) {
 			tracks = append(tracks, "+  "+t.Name+" (now playing)")
 		} else {
-			tracks = append(tracks, "-  "+t.Name+"")
+			tracks = append(tracks, "-  "+t.Name)
 		}
 	}
 
-	msg := strings.Join(tracks, "\n")
-	_, err = ds.ChannelMessageSend(m.ChannelID, "```\n"+msg+"\n```")
-	if err != nil {
-		log.Printf("handleQueue: %v", err)
-	}
-
+	s.sendMsg(e, "```\n"+strings.Join(tracks, "\n")+"\n```")
 }
 
-func (s *DiscordBot) sendMsg(ds *discordgo.Session, channelID, msg string) error {
-	_, err := ds.ChannelMessageSend(channelID, msg)
-	if err != nil {
+func (s *DiscordBot) sendMsg(e *events.MessageCreate, msg string) {
+	if _, err := e.Client().Rest.CreateMessage(e.ChannelID,
+		discord.NewMessageCreate().WithContent(msg)); err != nil {
 		log.Printf("sendMsg: %v", err)
 	}
-	return err
 }
 
-func (s *DiscordBot) partialSendMsg(ds *discordgo.Session, channelID string) func(string) error {
+func (s *DiscordBot) partialSendMsg(e *events.MessageCreate) func(string) error {
+	channelID := e.ChannelID
+	rest := e.Client().Rest
 	return func(m string) error {
-		return s.sendMsg(ds, channelID, m)
+		_, err := rest.CreateMessage(channelID, discord.NewMessageCreate().WithContent(m))
+		return err
 	}
 }
 
-func (s *DiscordBot) partialJoinVoice(ds *discordgo.Session, guildID, authorID string) (func() (*discordgo.VoiceConnection, error), error) {
-	audioID, err := s.getSenderCID(ds, guildID, authorID)
+func (s *DiscordBot) partialJoinVoice(e *events.MessageCreate) (func() (voice.Conn, error), error) {
+	channelID, err := s.getSenderVoiceChannel(e)
 	if err != nil {
 		return nil, err
 	}
+	guildID := *e.GuildID
+	vm := e.Client().VoiceManager
 
-	return func() (*discordgo.VoiceConnection, error) {
-		return ds.ChannelVoiceJoin(guildID, audioID, false, true)
+	return func() (voice.Conn, error) {
+		// TODO: track active sessions properly to avoid recreating
+		conn := vm.CreateConn(guildID)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := conn.Open(ctx, channelID, false, true); err != nil {
+			return nil, fmt.Errorf("joining voice: %w", err)
+		}
+		return conn, nil
 	}, nil
 }
 
-func (s *DiscordBot) getOrCreateSession(ds *discordgo.Session, m *discordgo.MessageCreate) (*Session, string, error) {
-	joinVoice, err := s.partialJoinVoice(ds, m.GuildID, m.Author.ID)
+func (s *DiscordBot) getOrCreateSession(e *events.MessageCreate) (*Session, string, error) {
+	joinVoice, err := s.partialJoinVoice(e)
 	if err != nil {
 		return nil, "", err
 	}
-	sendMsg := s.partialSendMsg(ds, m.ChannelID)
-	return s.sessions.FromOrCreate(m.GuildID, sendMsg, joinVoice)
+	return s.sessions.FromOrCreate(e.GuildID.String(), s.partialSendMsg(e), joinVoice)
 }
 
-func (s *DiscordBot) handleCreate(ds *discordgo.Session, m *discordgo.MessageCreate) {
-	_, sessionToken, err := s.getOrCreateSession(ds, m)
+func (s *DiscordBot) handleCreate(e *events.MessageCreate) {
+	_, sessionToken, err := s.getOrCreateSession(e)
 	if err != nil {
-		s.sendErrorMsg(ds, m, err)
+		s.sendErrorMsg(e, err)
 		return
 	}
-	s.sendMsg(ds, m.GuildID, fmt.Sprintf("%s %s/?s=%s", "join here: ", siteURL, sessionToken))
+	s.sendMsg(e, fmt.Sprintf("join here: %s/?s=%s", siteURL, sessionToken))
 }
 
-func (s *DiscordBot) handleStop(ds *discordgo.Session, m *discordgo.MessageCreate) {
-	gs, err := s.sessions.FromGuild(m.GuildID)
+func (s *DiscordBot) handleStop(e *events.MessageCreate) {
+	gs, err := s.sessions.FromGuild(e.GuildID.String())
 	if err != nil {
-		s.sendErrorMsg(ds, m, err)
+		s.sendErrorMsg(e, err)
 		return
 	}
 	gs.Stop()
-
-	ds.ChannelMessageSend(m.ChannelID, "bye! see you soon :)")
+	s.sendMsg(e, "bye! see you soon :)")
 }
 
-func (s *DiscordBot) handleSkip(ds *discordgo.Session, m *discordgo.MessageCreate) {
-	gs, err := s.sessions.FromGuild(m.GuildID)
+func (s *DiscordBot) handleSkip(e *events.MessageCreate) {
+	gs, err := s.sessions.FromGuild(e.GuildID.String())
 	if err != nil {
-		s.sendErrorMsg(ds, m, err)
+		s.sendErrorMsg(e, err)
 		return
 	}
 	gs.Skip()
-}
-
-func (s *DiscordBot) sendMessage(ds discordSession, id, message string) {
-	m, err := ds.ChannelMessageSend(id, message)
-	if err != nil {
-		log.Printf("error sending message: %v", err)
-		log.Printf("channel.id = %v", id)
-		log.Printf("m = %v", m)
-	}
 }

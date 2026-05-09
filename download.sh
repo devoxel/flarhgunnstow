@@ -9,4 +9,4 @@ youtube-dl \
 	--format "bestaudio" \
 	$1 \
 	-o - \
-	| ffmpeg -i pipe:0 -f s16le -ar 48000 -ac 2 pipe:1
+	| ffmpeg -i pipe:0 -vn -c:a libopus -ar 48000 -ac 2 -f ogg pipe:1

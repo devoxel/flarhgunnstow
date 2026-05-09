@@ -1,10 +1,4 @@
-# TODO
-
-### Urgent
-
-- Fix
-
-### Wanted Text API
+## Wanted Text API
 
 ```
 playlist add name [url] | add a playlist

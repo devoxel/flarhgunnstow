@@ -6,7 +6,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/voice"
 )
 
 // GuildPlaylist store all playlists sorted (but with O(n logn) inserts)
@@ -106,7 +106,7 @@ type Session struct {
 	playlists *GuildPlaylist
 
 	msg       func(msg string) error
-	joinVoice func() (voice *discordgo.VoiceConnection, err error)
+	joinVoice func() (voice.Conn, error)
 	p         *Player
 }
 

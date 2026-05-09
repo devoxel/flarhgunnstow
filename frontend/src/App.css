@@ -34,14 +34,15 @@ body {
 
 .Player {
   color: var(--colour-green);
+  display: inline;
 }
 
-.Player-note {
+.Player-Note {
   color: var(--colour-orange);
 }
 
 .InvalidSession {
-  font-family: 5em;
+  font-size: 2em;
   color: var(--colour-base00);
 }
 
@@ -59,11 +60,6 @@ body {
   float: left;
   color: var(--colour-red);
 
-  -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  -khtml-user-select: none;
-  -moz-user-select: none;
-  -ms-user-select: none;
   user-select: none;
 }
 
@@ -81,9 +77,6 @@ body {
   text-decoration: none;
 }
 
-.Player {
-  display: inline;
-}
 
 .PlayerBar {
   position: fixed;
@@ -109,14 +102,14 @@ body {
 
 .Player-SkipButton {
   color: var(--colour-yellow);
-  background-color: var(--colour-base-01);
+  background-color: var(--colour-base01);
   background: none;
   border: none;
 }
 
 .Player-PopUpButton {
   color: var(--colour-yellow);
-  background-color: var(--colour-base-01);
+  background-color: var(--colour-base01);
   background: none;
   border: none;
 }

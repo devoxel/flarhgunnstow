@@ -9,11 +9,14 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const (
 	ACCOUNTS_URL = "https://accounts.spotify.com/api/token"
 )
+
+var spotifyHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
 type SpotifyAuthResponse struct {
 	AccessToken string `json:"access_token,omitempty"`
@@ -52,10 +55,11 @@ func (s *Client) Authorize() error {
 
 	req.Header.Set("Authorization", auth)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	res, err := http.DefaultClient.Do(req)
+	res, err := spotifyHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("Authorize: error sending API request: %w", err)
 	}
+	defer res.Body.Close()
 
 	if res.StatusCode != 200 {
 		return fmt.Errorf("Authorize: invalid auth: response: %v", res) // XXX: debug logs

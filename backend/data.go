@@ -2,30 +2,110 @@ package main
 
 import (
 	"encoding/json"
-	"io/ioutil"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
 )
+
+var audioExts = map[string]bool{
+	".mp3": true, ".ogg": true, ".opus": true,
+	".flac": true, ".wav": true, ".m4a": true, ".aac": true,
+}
+
+// initFromDir scans videoDir and builds playlists from the directory structure.
+// Files directly in videoDir go into a playlist named after the directory.
+// Files in subdirectories get one playlist per subdirectory.
+func initFromDir() {
+	if videoDir == "" || videoDir == "." {
+		return
+	}
+
+	entries, err := os.ReadDir(videoDir)
+	if err != nil {
+		log.Printf("initFromDir: cannot read video dir %s: %v", videoDir, err)
+		return
+	}
+
+	// tracks at root level
+	var rootTracks []Track
+
+	for _, e := range entries {
+		if e.IsDir() {
+			// one playlist per subdirectory
+			subDir := filepath.Join(videoDir, e.Name())
+			subEntries, err := os.ReadDir(subDir)
+			if err != nil {
+				log.Printf("initFromDir: cannot read subdir %s: %v", subDir, err)
+				continue
+			}
+			var tracks []Track
+			for _, f := range subEntries {
+				if f.IsDir() {
+					continue
+				}
+				if !audioExts[strings.ToLower(filepath.Ext(f.Name()))] {
+					continue
+				}
+				name := strings.TrimSuffix(f.Name(), filepath.Ext(f.Name()))
+				tracks = append(tracks, Track{
+					Name: name,
+					Path: filepath.Join(subDir, f.Name()),
+				})
+			}
+			if len(tracks) == 0 {
+				continue
+			}
+			title := e.Name()
+			if _, exists := samplePlaylists[title]; exists {
+				log.Printf("initFromDir: skipping %s, already loaded from sample.json", title)
+				continue
+			}
+			samplePlaylists[title] = &Playlist{Title: title, Category: "Local", Tracks: tracks}
+			log.Printf("initFromDir: loaded playlist %q (%d tracks)", title, len(tracks))
+		} else {
+			if !audioExts[strings.ToLower(filepath.Ext(e.Name()))] {
+				continue
+			}
+			name := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
+			rootTracks = append(rootTracks, Track{
+				Name: name,
+				Path: filepath.Join(videoDir, e.Name()),
+			})
+		}
+	}
+
+	if len(rootTracks) > 0 {
+		title := filepath.Base(videoDir)
+		if _, exists := samplePlaylists[title]; exists {
+			title = title + " (local)"
+		}
+		samplePlaylists[title] = &Playlist{Title: title, Category: "Local", Tracks: rootTracks}
+		log.Printf("initFromDir: loaded root playlist %q (%d tracks)", title, len(rootTracks))
+	}
+}
 
 var samplePlaylists map[string]*Playlist
 
 func initSample() {
 	samplePlaylists = map[string]*Playlist{}
 
-	sample, err := ioutil.ReadFile("sample.json")
+	sample, err := os.ReadFile("sample.json")
 	if err != nil {
-		log.Println("initSample: could not read sample.json")
-		return
+		log.Println("initSample: could not read sample.json, skipping")
+	} else {
+		lists := []*Playlist{}
+		json.Unmarshal(sample, &lists)
+		for _, pl := range lists {
+			if _, exists := samplePlaylists[pl.Title]; exists {
+				log.Fatal("initSample: cannot have duplicate titles (playlists are indexed by name)")
+			}
+			samplePlaylists[pl.Title] = pl
+			log.Printf("initSample: initalized playlist: %s", pl.Title)
+		}
 	}
 
-	lists := []*Playlist{}
-	json.Unmarshal(sample, &lists)
-	for _, pl := range lists {
-		if _, exists := samplePlaylists[pl.Title]; exists {
-			log.Fatal("initSample: cannot have duplicate titles (playlists are indexed by name)")
-		}
-		samplePlaylists[pl.Title] = pl
-		log.Printf("initSample: initalized playlist: %s", pl.Title)
-	}
+	initFromDir()
 }
 
 /*

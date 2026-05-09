@@ -9,7 +9,7 @@ then
 	cd ..
 fi
 
-go run ./backend -t "$DISCORD_TOKEN" -p 9116 -d "$(pwd)" \
+go run ./backend -t "$DISCORD_TOKEN" -p 9116 -d "$(pwd)" --debug=true \
 	-spotify-id="$SPOTIFY_ID" -spotify-secret="$SPOTIFY_TOKEN" \
 	-video-dir="$(pwd)/videocache" --working-dir="$(pwd)" \
-	-url="https://dndmusic.devoxel.dev"
+	-url="${SITE_URL:-http://localhost:9116}"

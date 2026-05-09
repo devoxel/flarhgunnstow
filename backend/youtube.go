@@ -41,23 +41,21 @@ func infoArgs() []string {
 	return append(shared, "-j")
 }
 
-// CMD builds a youtube-dl download command for the given track
+// CMD builds a command to stream the given track as OGG/Opus to stdout.
+// If the track has a local Path set, ffmpeg reads the file directly.
+// Otherwise it falls back to youtube-dl via download.sh.
 func (t Track) CMD() *exec.Cmd {
-	/*
-		// Here re-encode with ffmpeg which is faster using raw in between
-		// TODO: replace ffmpeg args here with contants
-		// TODO: test out "-movflags +faststart"
-		args := []string{
-			"-o", "-", // to stdout (for ffmpeg)
-			// "--exec", "ffmpeg -i - -vn -sample_fmt s16 -acodec libopus -ar 48000 -ac 2",
-			"--exec", "ffmpeg -vn -c:a libopus -b:a 48K -ac 2",
-		}
-		args = append(args, sharedArgs()...)
-		args = append(args, t.URL)
-		return exec.Command("youtube-dl", args...)
-	*/
-	// XXX: build command in GoLang.
-	// Overhead of a shell is OK tbh.
+	if t.Path != "" {
+		return exec.Command("ffmpeg",
+			"-i", t.Path,
+			"-vn",
+			"-c:a", "libopus",
+			"-ar", "48000",
+			"-ac", "2",
+			"-f", "ogg",
+			"pipe:1",
+		)
+	}
 	return exec.Command("bash", workingDir+"/download.sh", t.URL)
 }
 

@@ -4,13 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math/rand"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
-	"time"
 
-	"github.com/bwmarrin/discordgo"
 	"github.com/devoxel/dndmusic/spotify"
+	"github.com/disgoorg/disgo/voice"
 )
 
 type AudioDownloadManager struct {
@@ -22,11 +22,12 @@ type AudioDownloadManager struct {
 	s *spotify.Client
 }
 
-func writeJSON(path string, t interface{}) error {
+func writeJSON(path string, t any) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
+	defer f.Close()
 
 	// No reason to be concerned about bytes here for right now.
 	e := json.NewEncoder(f)
@@ -34,14 +35,15 @@ func writeJSON(path string, t interface{}) error {
 	if err := e.Encode(t); err != nil {
 		return err
 	}
-	return f.Close()
+	return nil
 }
 
-func loadJSON(path string, t interface{}) error {
+func loadJSON(path string, t any) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
+	defer f.Close()
 
 	d := json.NewDecoder(f)
 	if err := d.Decode(t); err != nil {
@@ -53,14 +55,6 @@ func loadJSON(path string, t interface{}) error {
 
 func getPlaylistCachePath() string {
 	return fmt.Sprintf("%s/playlist_cache.json", videoDir)
-}
-
-func getTrackCachePath() string {
-	return fmt.Sprintf("%s/video_cache.json", videoDir)
-}
-
-func getSearchCachePath() string {
-	return fmt.Sprintf("%s/search_cache.json", videoDir)
 }
 
 // flush cache to disk. don't hotload or anything fancy. eventually we could
@@ -77,6 +71,10 @@ func (adm *AudioDownloadManager) flushCache() error {
 }
 
 func (adm *AudioDownloadManager) readCache() error {
+	if err := os.MkdirAll(videoDir, 0755); err != nil {
+		return fmt.Errorf("creating video dir: %w", err)
+	}
+
 	adm.Lock()
 
 	if err := loadJSON(getPlaylistCachePath(), &adm.playlistCache); err != nil {
@@ -91,12 +89,6 @@ func (adm *AudioDownloadManager) readCache() error {
 	return adm.flushCache()
 }
 
-func randDuration() time.Duration {
-	const min time.Duration = time.Second * 60
-	rand := time.Duration(rand.Intn(420)+1) * time.Second
-	return min + rand
-}
-
 // Initalized in init(), see main.go
 var adm *AudioDownloadManager = nil
 
@@ -107,19 +99,18 @@ type Player struct {
 	audio  chan []byte
 	signal chan PlayerSignal
 
-	playerOn bool
-	exit     chan struct{}
+	exit chan struct{}
 }
 
 func NewPlayer() *Player {
 	return &Player{}
 }
 
-func (p *Player) Start(msg func(msg string) error, joinVoice func() (voice *discordgo.VoiceConnection, err error)) {
+func (p *Player) Start(msg func(msg string) error, joinVoice func() (voice.Conn, error)) {
 	log.Println("Start(): starting...") // XXX DEBUG
 	p.Lock()
 	defer p.Unlock()
-	if p.playerOn {
+	if p.signal != nil {
 		p.signal <- SigReload
 		return
 	}
@@ -128,15 +119,59 @@ func (p *Player) Start(msg func(msg string) error, joinVoice func() (voice *disc
 		p.q = NewPlayerQ()
 	}
 	p.signal = make(chan PlayerSignal)
-	p.playerOn = true
 	go p.PlayLoop(msg, joinVoice)
+}
+
+// queueLocalFile looks for a file in videoDir whose name contains search
+// (case-insensitive). Returns the matched Track or an error.
+func queueLocalFile(search string) (Track, error) {
+	entries, err := os.ReadDir(videoDir)
+	if err != nil {
+		return Track{}, fmt.Errorf("reading video dir: %w", err)
+	}
+	lower := strings.ToLower(search)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if strings.Contains(strings.ToLower(e.Name()), lower) {
+			path := filepath.Join(videoDir, e.Name())
+			name := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
+			return Track{Name: name, Path: path}, nil
+		}
+	}
+	return Track{}, fmt.Errorf("no local file found matching %q in %s", search, videoDir)
 }
 
 func (p *Player) QueueSingle(search string) (Track, error) {
 	log.Printf("QueueSingle: queueing %s", search)
-	track, err := adm.DLInfo(search)
-	if err != nil {
-		return Track{}, err
+
+	// If search looks like an absolute path or a relative path to an existing
+	// file, treat it as a local file directly.
+	var track Track
+	var err error
+	if filepath.IsAbs(search) {
+		if _, statErr := os.Stat(search); statErr == nil {
+			name := strings.TrimSuffix(filepath.Base(search), filepath.Ext(search))
+			track = Track{Name: name, Path: search}
+		} else {
+			return Track{}, fmt.Errorf("local file not found: %s", search)
+		}
+	} else if videoDir != "" && videoDir != "." {
+		// Try local file search first; fall back to youtube-dl on failure.
+		track, err = queueLocalFile(search)
+		if err != nil {
+			log.Printf("QueueSingle: local lookup failed (%v), trying youtube-dl", err)
+			track, err = adm.DLInfo(search)
+			if err != nil {
+				return Track{}, err
+			}
+		}
+	} else {
+		track, err = adm.DLInfo(search)
+		if err != nil {
+			return Track{}, err
+		}
 	}
 
 	p.Lock()
@@ -163,7 +198,7 @@ func (p *Player) Playing() (Track, []Track) {
 	p.Lock()
 	defer p.Unlock()
 
-	if !p.playerOn {
+	if p.signal != nil {
 		return Track{}, []Track{}
 	}
 

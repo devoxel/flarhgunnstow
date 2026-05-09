@@ -2,30 +2,17 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
 	"path"
-	"strconv"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-func genSessionID(ongoingSessions *SessionManager) string {
-	for {
-		session := strconv.Itoa(rand.Int())
-		if !ongoingSessions.Exists(session) {
-			return session
-		}
-	}
-}
-
-func writeError(where string, w http.ResponseWriter, r *http.Request, err error, c int) {
+func writeError(where string, w http.ResponseWriter, _ *http.Request, err error, c int) {
 	log.Printf("%s: %v", where, err)
 	http.Error(w, err.Error(), c)
 }
@@ -36,7 +23,7 @@ type wsMsg struct {
 	// StatusCheck
 	Status           string      `json:"status,omitempty"`
 	Playlists        []*Playlist `json:"playlists,omitempty"`
-	CurrentlyPlaying Track       `json:"playing,omitempty"`
+	CurrentlyPlaying Track       `json:"playing"`
 	CurrentPlaylist  []Track     `json:"current_playlist,omitempty"`
 
 	// MusicSelect
@@ -47,20 +34,7 @@ type wsMsg struct {
 	//  Empty.
 }
 
-func wsInvalidSession(ongoingSessions *SessionManager, id string, req wsMsg) (wsMsg, error) {
-	res := wsMsg{}
-
-	if req.Message != "StatusCheck" {
-		return res, errors.New("wsInvalidSession: Non StatusCheck in unvalidated session")
-	}
-
-	return wsMsg{
-		Message: "StatusCheckResponse",
-		Status:  "Unverified",
-	}, nil
-}
-
-func wsStatusCheck(ongoingSessions *SessionManager, id string, req wsMsg) (wsMsg, error) {
+func wsStatusCheck(ongoingSessions *SessionManager, id string, _ wsMsg) (wsMsg, error) {
 	st, err := ongoingSessions.GetState(id)
 	if err != nil {
 		return wsMsg{}, err
@@ -84,11 +58,10 @@ func wsMusicSelect(ongoingSessions *SessionManager, id string, req wsMsg) error 
 		Message "MusicSelectionResponse",
 	}
 	*/
-
 	return ongoingSessions.SetPlaylist(id, req.Title)
 }
 
-func wsMusicSkip(ongoingSessions *SessionManager, id string, req wsMsg) error {
+func wsMusicSkip(ongoingSessions *SessionManager, id string, _ wsMsg) error {
 	/* XXX: Eventually return to show errors to user.
 	return wsMsg{
 		Message "MusicSelectionResponse",
@@ -106,11 +79,9 @@ func wsMusicSkip(ongoingSessions *SessionManager, id string, req wsMsg) error {
 
 func readLoop(c *websocket.Conn, id string, ongoingSessions *SessionManager) {
 	// it would be more clever to not create my own simplistic RPC protocol.
-	// here and instead use a proper RPC over websocket.
-	// but lets be simple about it and just go for it.
+	// here and instead use a proper RPC over websocket. but, YOLO.
 
 	// TODO: Remove polling in favour of non polling approach.
-
 	// TODO: Limit the amount of loops here to prevent ddos without a ticker.
 	t := time.NewTicker(500 * time.Millisecond)
 	defer c.Close()
@@ -145,15 +116,15 @@ func readLoop(c *websocket.Conn, id string, ongoingSessions *SessionManager) {
 
 		var res wsMsg
 
-		switch {
-		case req.Message == "StatusCheck":
+		switch req.Message {
+		case "StatusCheck":
 			res, err = wsStatusCheck(ongoingSessions, id, req)
 			if err != nil {
 				log.Printf("readLoop: StatusCheck: %v", err)
 				c.Close()
 				return
 			}
-		case req.Message == "MusicSelect":
+		case "MusicSelect":
 			err = wsMusicSelect(ongoingSessions, id, req)
 			if err != nil {
 				log.Printf("readLoop: MusicSelect: %v", err)
@@ -161,7 +132,7 @@ func readLoop(c *websocket.Conn, id string, ongoingSessions *SessionManager) {
 				return
 			}
 			continue
-		case req.Message == "MusicSkip":
+		case "MusicSkip":
 			err = wsMusicSkip(ongoingSessions, id, req)
 			if err != nil {
 				log.Printf("readLoop: MusicSkip: %v", err)
@@ -189,10 +160,14 @@ func readLoop(c *websocket.Conn, id string, ongoingSessions *SessionManager) {
 }
 
 func websocketHandler(ongoingSessions *SessionManager) func(w http.ResponseWriter, r *http.Request) {
+	var originFunc func(r *http.Request) bool = nil
+	if debugMode {
+		originFunc = func(r *http.Request) bool { return true }
+	}
 	var upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
-		CheckOrigin:     func(r *http.Request) bool { return true }, // XXX DEBUG
+		CheckOrigin:     originFunc,
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -216,14 +191,14 @@ func websocketHandler(ongoingSessions *SessionManager) func(w http.ResponseWrite
 }
 
 func handlerInit(ongoingSessions *SessionManager) {
-	frontendPath := path.Join(runningDir, "frontend/build")
+	frontendPath := path.Join(runningDir, "frontend/dist")
 	index := path.Join(frontendPath, "index.html")
 	_, err := os.Stat(index)
 	if err != nil {
 		log.Fatalf("cannot stat frontend path %v: %v", index, err)
 	}
 
-	d, _ := ioutil.ReadFile(index)
+	d, _ := os.ReadFile(index)
 	fmt.Println(string(d))
 
 	staticHandler := http.FileServer(http.Dir(frontendPath))

@@ -19,10 +19,14 @@ type Track struct {
 	Name     string `json:"name,omitempty"`
 	Uploader string `json:"uploader,omitempty"`
 	URL      string `json:"url,omitempty"`
+	Path     string `json:"path,omitempty"`
 }
 
 func (t Track) Equal(o Track) bool {
-	return t.URL == o.URL // URL is as good as an ID
+	if t.Path != "" {
+		return t.Path == o.Path
+	}
+	return t.URL == o.URL
 }
 
 type Playlist struct {
@@ -154,8 +158,12 @@ func (p *PlayerQ) Insert(idx int, t Track) error {
 		return nil
 	}
 
-	p.playlist = append(p.playlist[:idx+1], p.playlist[idx:]...)
-	p.playlist[idx] = t
+	// Use three-index slice to force a new backing array,
+	// avoiding aliasing between the left and right sub-slices.
+	p.playlist = append(
+		append(p.playlist[:idx:idx], t),
+		p.playlist[idx:]...,
+	)
 
 	return nil
 }

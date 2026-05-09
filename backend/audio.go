@@ -14,42 +14,21 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/voice"
 	"github.com/jonas747/ogg"
 )
 
-func waitForReady(conn *discordgo.VoiceConnection) error {
-	const limit = time.Second * 60
-	t := time.NewTimer(limit)
-	for {
-		select {
-		case <-t.C:
-			return fmt.Errorf("waited over timeout (>%v) for discord connection to ready up", limit)
-		default:
-			if conn.Ready {
-				return nil
-			}
-			time.Sleep(time.Second)
-		}
-	}
-
-}
-
 const (
-	sampleRate = 48000
-	DLBitrate  = "48000K"
-	channels   = 2
-	frameSize  = 960
-	maxBytes   = frameSize * 4
+	DLBitrate = "48000K"
 )
 
 // PlayLoop manages the Player, grabbing tracks off the Q and decoding them.
 //
 // PlayLoop handles various signals, like file skipping.
-func (p *Player) PlayLoop(msg func(string) error, joinVoice func() (*discordgo.VoiceConnection, error)) {
+func (p *Player) PlayLoop(msg func(string) error, joinVoice func() (voice.Conn, error)) {
 	p.Lock()
 	p.playerOn = true
-	// Using extra channels prevents ffmpeg stutters from disupting our output.
+	// Using extra channels prevents ffmpeg stutters from disrupting our output.
 	// Why 64? I heard it's 1 stacks worth.
 	audio := make(chan []byte, 64)
 	p.Unlock()
@@ -67,8 +46,8 @@ func (p *Player) PlayLoop(msg func(string) error, joinVoice func() (*discordgo.V
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start toDiscord goroutine & ensure it dies correctly
 	go func() {
+		defer cancel()
 		if err := p.toDiscord(ctx, audio, joinVoice); err != nil {
 			logErr(err)
 		}
@@ -111,16 +90,12 @@ func (p *Player) PlayLoop(msg func(string) error, joinVoice func() (*discordgo.V
 			return
 		}
 
-		// TODO: should impelment a catch here to prevent very fast reloading
+		// TODO: should implement a catch here to prevent very fast reloading
 	}
 }
 
-// DecodeTrack decodes a track (using it's URL) and sends it into the
-// pcm channel.
-//
-// DecodeTrackLoop is also responsible for handling signals like
-// - reload / skip / etc
-// since it's controlling PCM input.
+// DecodeTrackLoop decodes a track (using its CMD) and sends opus packets into
+// the audio channel. It also handles signals like reload / skip / etc.
 func (p *Player) DecodeTrackLoop(ctx context.Context, audio chan []byte, f *exec.Cmd) (PlayerSignal, error) {
 	log.Println("DecodeTrackLoop: starting ", f.Args)
 	const ffmpegBuffer = 16384 * 4
@@ -134,8 +109,9 @@ func (p *Player) DecodeTrackLoop(ctx context.Context, audio chan []byte, f *exec
 	defer func() {
 		if f.Process != nil {
 			if err := f.Process.Kill(); err != nil {
-				log.Printf("DecodeTrackLoop: error killing ffpmeg: %v", err)
+				log.Printf("DecodeTrackLoop: error killing ffmpeg: %v", err)
 			}
+			f.Wait() // XXX: may need some escape hatch if we get stuck here.
 		}
 	}()
 
@@ -161,7 +137,6 @@ func (p *Player) DecodeTrackLoop(ctx context.Context, audio chan []byte, f *exec
 
 		select {
 		case <-ctx.Done():
-			// We've been told to finish up here.
 			return SigStop, nil
 		case in := <-p.signal:
 			return in, nil
@@ -170,42 +145,57 @@ func (p *Player) DecodeTrackLoop(ctx context.Context, audio chan []byte, f *exec
 	}
 }
 
-// toDiscord is responsible for handling the discord audio connection
+// toDiscord handles the discord audio connection, pacing opus frames at 20ms.
 func (p *Player) toDiscord(ctx context.Context, audio chan []byte,
-	joinVoice func() (*discordgo.VoiceConnection, error)) error {
+	joinVoice func() (voice.Conn, error)) error {
 	conn, err := joinVoice()
 	if err != nil {
 		return err
 	}
-	defer conn.Disconnect()
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		conn.Close(closeCtx)
+	}()
 
-	// conn.LogLevel = discordgo.LogDebug // uncomment if stuff starts acting weird
-	if err := waitForReady(conn); err != nil {
+	if err := conn.SetSpeaking(ctx, voice.SpeakingFlagMicrophone); err != nil {
 		return err
 	}
 
-	if err := conn.Speaking(true); err != nil {
-		return err
-	}
+	// DisGo requires draining incoming UDP packets.
+	go func() {
+		for {
+			if _, err := conn.UDP().ReadPacket(); err != nil {
+				return
+			}
+		}
+	}()
+
+	// DisGo does not handle frame timing internally — pace at 20ms per opus frame.
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
 
 	var in []byte
 	for {
+		// Wait for the next audio frame (with auto-disconnect timeout).
 		select {
 		case <-ctx.Done():
 			return nil
 		case in = <-audio:
 		case <-time.After(time.Second * 120):
-			// haven't got a frame in a long time
-			// assume everything is okay and we are supposed to leave now.
-			// this doubles as an auto timeout.
+			// Haven't received a frame in a long time; auto-disconnect.
 			return nil
 		}
 
+		// Pace to 20ms cadence before sending.
 		select {
-		case conn.OpusSend <- in:
-		case <-time.After(time.Second):
-			// We haven't been able to send a frame in a second, assume something is fucked
-			return errors.New("couldn't send audio to discord")
+		case <-ticker.C:
+		case <-ctx.Done():
+			return nil
+		}
+
+		if _, err := conn.UDP().Write(in); err != nil {
+			return fmt.Errorf("couldn't send audio to discord: %w", err)
 		}
 	}
 }
