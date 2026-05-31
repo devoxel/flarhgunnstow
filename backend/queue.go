@@ -189,7 +189,6 @@ func (p *PlayerQ) SkipNext() Track {
 }
 
 func (p *PlayerQ) Current() (Track, []Track, error) {
-	// TODO: Avoid locking Q every time we look at the current playlist (with RWMutex??)
 	p.Lock()
 	defer p.Unlock()
 	if len(p.playlist) == 0 {
@@ -197,9 +196,12 @@ func (p *PlayerQ) Current() (Track, []Track, error) {
 	}
 
 	if p.current >= len(p.playlist) {
-		// wuh woh
 		return Track{}, []Track{}, errors.New("the queue has been mangled...")
 	}
 
-	return p.playlist[p.current], p.playlist, nil
+	// Return a copy of the backing slice so callers cannot mutate our queue
+	// out from under us once the lock is released.
+	cp := make([]Track, len(p.playlist))
+	copy(cp, p.playlist)
+	return cp[p.current], cp, nil
 }

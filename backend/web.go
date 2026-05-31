@@ -27,7 +27,6 @@ type wsMsg struct {
 	CurrentPlaylist  []Track     `json:"current_playlist,omitempty"`
 
 	// MusicSelect
-	Type  string `json:"type,omitempty"` // UNUSED
 	Title string `json:"title,omitempty"`
 
 	// MusicSkip
@@ -197,9 +196,6 @@ func handlerInit(ongoingSessions *SessionManager) {
 	if err != nil {
 		log.Fatalf("cannot stat frontend path %v: %v", index, err)
 	}
-
-	d, _ := os.ReadFile(index)
-	fmt.Println(string(d))
 
 	staticHandler := http.FileServer(http.Dir(frontendPath))
 

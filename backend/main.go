@@ -1,7 +1,5 @@
 package main
 
-import "C"
-
 import (
 	"context"
 	"flag"
@@ -10,7 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -45,7 +43,10 @@ func init() {
 	flag.IntVar(&port, "p", 8080, "port to run the discord bot")
 	flag.StringVar(&runningDir, "d", "", "running directory")
 	flag.BoolVar(&debugMode, "debug", false, "disable xss checks + print more debug")
+	flag.StringVar(&dbPath, "db", "", "sqlite database file path (defaults to <running-dir>/flarhgunnstow.db)")
 }
+
+var dbPath string
 
 func validateWorkingDir() {
 	_, err := os.ReadFile(workingDir + "/cookies.txt")
@@ -122,10 +123,22 @@ func main() {
 		log.Fatal("no site url provided")
 	}
 
-	ongoingSessions := &SessionManager{
-		sessions:    sync.Map{},
-		guildLookup: sync.Map{},
+	if dbPath == "" {
+		dbPath = filepath.Join(runningDir, "flarhgunnstow.db")
 	}
+	store, err := NewStore(dbPath)
+	if err != nil {
+		log.Fatalf("cannot open persistence (%s): %v", dbPath, err)
+	}
+	defer store.Close()
+
+	if err := store.AddLocalDefaults(videoDir); err != nil {
+		log.Printf("warning: scanning videoDir for defaults failed: %v", err)
+	}
+
+	log.Printf("persistence opened at %s", dbPath)
+
+	ongoingSessions := NewSessionManager(store)
 
 	client := initBot(ongoingSessions)
 	defer func() {
@@ -136,7 +149,6 @@ func main() {
 
 	log.Println("discord initialized ...")
 	handlerInit(ongoingSessions)
-	initSample()
 
 	go func() {
 		log.Printf("hosting web server on port: %v ...", port)

@@ -11,27 +11,40 @@ import (
 )
 
 var (
-	ErrGuildPlaylistExists       = errors.New("a playlist with that title already exists")
-	ErrGuildPlaylistDoesNotExist = errors.New("a playlist with that title does not exist")
+	ErrSessionExists       = errors.New("session already exists")
+	ErrSessionDoesNotExist = errors.New("session does not exist")
 )
 
+// SessionManager owns the registry of active (in-memory) sessions and the
+// persistent Store. Sessions are ephemeral; the Store survives restarts.
 type SessionManager struct {
 	mu sync.Mutex
 
-	// guildLookup provides a way to ongoing sessions for a guild
-	//   i.e., map[guild id] -> session id
-	// This is used when we get a discord command, to ensure we modify
-	// the session that belongs to that guild
+	store *Store
+
+	// guildLookup maps a Discord guild ID to its current session ID.
 	guildLookup map[string]string
 
-	// sessions contains all ongoing discord sessions
-	//   i.e., map[session id] -> state
+	// sessions maps a session ID to its in-memory state.
 	sessions map[string]*Session
 }
 
-var ErrSessionExists = errors.New("session already exists")
-var ErrSessionDoesNotExist = errors.New("session does not exist")
+// NewSessionManager constructs a manager backed by the given Store.
+func NewSessionManager(store *Store) *SessionManager {
+	return &SessionManager{
+		store:       store,
+		guildLookup: map[string]string{},
+		sessions:    map[string]*Session{},
+	}
+}
 
+// FromOrCreate returns the existing session for a guild or creates a new one.
+// On creation it ensures the guild is registered in the Store and clones the
+// default playlists into it (idempotent on subsequent calls for other guilds).
+//
+// Callers always pass fresh msg / joinVoice closures bound to the originating
+// Discord event; we update those on every call so the latest channel context
+// is used.
 func (s *SessionManager) FromOrCreate(guildID string,
 	msg func(msg string) error, joinVoice func() (voice.Conn, error)) (*Session, string, error) {
 	s.mu.Lock()
@@ -39,37 +52,40 @@ func (s *SessionManager) FromOrCreate(guildID string,
 
 	sID, ok := s.guildLookup[guildID]
 	if !ok {
-		// XXX: WE NEED TO PERSIST GUILDS HERE!! SUPER MEGA IMPORTANT!!!
-		sID = generateSID(s)
+		if err := s.store.EnsureGuild(guildID); err != nil {
+			return nil, "", fmt.Errorf("FromOrCreate: ensure guild: %w", err)
+		}
+		if err := s.store.CloneDefaultPlaylists(guildID); err != nil {
+			return nil, "", fmt.Errorf("FromOrCreate: clone defaults: %w", err)
+		}
 
-		state := newSession()
-		s.sessions[sID] = state
+		sID = s.generateSID()
+		s.sessions[sID] = newSession(s.store, guildID)
 		s.guildLookup[guildID] = sID
 	}
 
 	state, ok := s.sessions[sID]
 	if !ok {
-		return nil, "", fmt.Errorf("Create: no corresponding guild state for session id %v", sID)
+		return nil, "", fmt.Errorf("FromOrCreate: no state for session id %v", sID)
 	}
 
 	state.msg = msg
 	state.joinVoice = joinVoice
-
 	return state, sID, nil
 }
 
+// FromGuild returns the active session for a guild, if any.
 func (s *SessionManager) FromGuild(guildID string) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	sID, exists := s.guildLookup[guildID]
-	if !exists {
+	sID, ok := s.guildLookup[guildID]
+	if !ok {
 		return nil, ErrSessionDoesNotExist
 	}
-
-	state, exists := s.sessions[sID]
-	if !exists {
-		return nil, fmt.Errorf("FromGuild: no corresponding guild state for session id %v", sID)
+	state, ok := s.sessions[sID]
+	if !ok {
+		return nil, fmt.Errorf("FromGuild: no state for session id %v", sID)
 	}
 	return state, nil
 }
@@ -77,34 +93,43 @@ func (s *SessionManager) FromGuild(guildID string) (*Session, error) {
 func (s *SessionManager) Exists(sID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	_, exists := s.sessions[sID]
-	return exists
+	_, ok := s.sessions[sID]
+	return ok
 }
 
 func (s *SessionManager) GetState(sID string) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	state, exists := s.sessions[sID]
-	if !exists {
+	state, ok := s.sessions[sID]
+	if !ok {
 		return nil, errors.New("invalid id")
 	}
 	return state, nil
 }
 
-func (s *SessionManager) SetPlaylist(id, url string) error {
-	// no lock here, its intentional :)
+// SetPlaylist is a convenience wrapper used by the WebSocket handler.
+func (s *SessionManager) SetPlaylist(id, title string) error {
 	state, err := s.GetState(id)
 	if err != nil {
 		return err
 	}
-	state.SetPlaylist(url)
+	state.SetPlaylist(title)
 	return nil
 }
 
-func generateSID(_ *SessionManager) string {
-	b := make([]byte, 16)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+// generateSID returns a cryptographically random session token. Caller must
+// hold s.mu so the uniqueness check is race-free.
+func (s *SessionManager) generateSID() string {
+	for {
+		b := make([]byte, 16)
+		if _, err := rand.Read(b); err != nil {
+			// crypto/rand failure is catastrophic; fall back to a panic so
+			// the operator notices rather than silently issuing weak IDs.
+			panic(fmt.Errorf("generateSID: %w", err))
+		}
+		sid := hex.EncodeToString(b)
+		if _, exists := s.sessions[sid]; !exists {
+			return sid
+		}
+	}
 }

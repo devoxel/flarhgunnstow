@@ -99,6 +99,8 @@ type Player struct {
 	audio  chan []byte
 	signal chan PlayerSignal
 
+	playerOn bool
+
 	exit chan struct{}
 }
 
@@ -198,7 +200,7 @@ func (p *Player) Playing() (Track, []Track) {
 	p.Lock()
 	defer p.Unlock()
 
-	if p.signal != nil {
+	if p.q == nil {
 		return Track{}, []Track{}
 	}
 
