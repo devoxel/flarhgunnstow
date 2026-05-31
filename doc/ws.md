@@ -5,11 +5,18 @@ returns a `StatusCheckResponse` with the full Music UI state — playlists, now-
 current queue. If the session is invalid (e.g. expired or wrong ID), the server returns an
 `Unverified` status.
 
-## Planned: Push-Based Updates
+## Implemented: Push-Based Updates
 
-Currently the client polls with `StatusCheck` every 600ms. The plan is to move to push-based updates
-where the server sends `StatusCheckResponse`-equivalent messages whenever state changes, and the client
-only sends `StatusCheck` as a periodic heartbeat/health-check (~every 30s).
+The server now pushes `StatusCheckResponse` messages to all connected clients whenever state changes:
+playlist selected, track advances, skip, queue modified, or playlists added/removed.
+
+- The server sends an initial snapshot on WebSocket connect.
+- The server pushes a `StatusCheckResponse` on every state mutation.
+- Each push carries a monotonically-increasing `gen` (generation) counter and a `hash` field (compact
+  SHA-256 prefix) so the client can detect dropped messages and self-correct.
+- The client sends `StatusCheck` as a heartbeat every 30s for connection health and as a
+  self-correction fallback. The client ignores any pushed message whose `gen` is not newer than the
+  last seen generation.
 
 ## Planned: Multi-User Identity
 

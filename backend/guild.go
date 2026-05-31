@@ -27,50 +27,62 @@ type Session struct {
 	msg       func(msg string) error
 	joinVoice func() (voice.Conn, error)
 	p         *Player
+
+	broadcaster *SessionBroadcaster
 }
 
 func newSession(store *Store, guildID string) *Session {
 	return &Session{
-		guildID: guildID,
-		store:   store,
-		p:       NewPlayer(),
+		guildID:     guildID,
+		store:       store,
+		p:           NewPlayer(),
+		broadcaster: NewSessionBroadcaster(),
 	}
 }
 
 func (gs *Session) SetPlaylist(title string) {
 	gs.Lock()
-	defer gs.Unlock()
-
 	pl, err := gs.store.LoadPlaylistByTitle(gs.guildID, title)
 	if err == ErrPlaylistNotFound {
+		gs.Unlock()
 		log.Printf("SetPlaylist: %q not found for guild %s", title, gs.guildID)
 		gs.msg(fmt.Sprintf("Sorry, I can't find the playlist %#v.", title))
 		return
 	} else if err != nil {
+		gs.Unlock()
 		log.Printf("SetPlaylist: load: %v", err)
 		gs.msg(fmt.Sprintf("Couldn't load that playlist: %v", err))
 		return
 	}
 
 	if err := gs.p.SetPlaylist(pl); err != nil {
+		gs.Unlock()
 		log.Printf("SetPlaylist: set: %v", err)
 		gs.msg(fmt.Sprintf("Couldn't set your playlist: %v", err))
 		return
 	}
 	gs.p.Start(gs.msg, gs.joinVoice)
+	gs.p.onTrackChange = gs.broadcastStateChange
+	gs.Unlock()
+
+	// Push update to all WebSocket clients.
+	gs.broadcastStateChange()
 }
 
 func (gs *Session) QueueSingle(search string) (Track, error) {
 	gs.Lock()
-	defer gs.Unlock()
-
 	track, err := gs.p.QueueSingle(search)
 	if err != nil {
+		gs.Unlock()
 		log.Printf("QueueSingle(%s) error: %v", search, err)
 		gs.msg(fmt.Sprintf("Oops! Flargunnstow failed at the modest task that was his charge. Debug: %#v", err))
 		return Track{}, err
 	}
 	gs.p.Start(gs.msg, gs.joinVoice)
+	gs.p.onTrackChange = gs.broadcastStateChange
+	gs.Unlock()
+
+	gs.broadcastStateChange()
 	return track, nil
 }
 
@@ -80,10 +92,12 @@ func (gs *Session) Playing() (Track, []Track) {
 
 func (gs *Session) Skip() {
 	gs.p.Skip()
+	gs.broadcastStateChange()
 }
 
 func (gs *Session) Stop() {
 	gs.p.Stop()
+	gs.broadcastStateChange()
 }
 
 // Playlists returns a freshly-loaded snapshot of the guild's playlists from
@@ -122,4 +136,21 @@ func (gs *Session) RemovePlaylist(title string) error {
 		return ErrGuildPlaylistDoesNotExist
 	}
 	return err
+}
+
+// Broadcaster returns the session broadcaster for push-based WebSocket updates.
+func (gs *Session) Broadcaster() *SessionBroadcaster {
+	return gs.broadcaster
+}
+
+// broadcastStateChange pushes a full state snapshot to all connected WebSocket
+// clients. Must be called without holding gs.Lock() (it acquires p.Lock
+// indirectly via Playing, and the store lock via Playlists).
+func (gs *Session) broadcastStateChange() {
+	snap, err := sessionSnapshot(gs)
+	if err != nil {
+		log.Printf("broadcastStateChange: snapshot: %v", err)
+		return
+	}
+	gs.broadcaster.Broadcast(snap)
 }

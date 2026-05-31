@@ -71,13 +71,16 @@ func (p *Player) PlayLoop(msg func(string) error, joinVoice func() (voice.Conn, 
 			return
 		}
 
-		/* TODO: move this logic to parent, stopping playback should be controlled from coordinater */
+		/* TODO: move this logic to parent, stopping playback should be controlled from coordinator */
 		switch sig.Type {
 		case SigTypeReload:
 			log.Println("got clear")
 			continue
 		case SigTypeSkip:
 			p.q.SkipNext()
+			if p.onTrackChange != nil {
+				p.onTrackChange()
+			}
 			continue
 		case SigTypeStop:
 			return

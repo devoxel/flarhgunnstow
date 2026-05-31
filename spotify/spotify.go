@@ -110,7 +110,7 @@ func (s *Client) GetUserPlaylists(id string) (*SimplePlaylistPage, error) {
 	return pl, nil
 }
 
-func (s *Client) get(url string, result interface{}) error {
+func (s *Client) get(url string, result any) error {
 	// XXX: add retries
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {

@@ -29,7 +29,8 @@ export default function App() {
   useEffect(() => {
     const session = new URLSearchParams(window.location.search).get('s')
     let isMounted = true
-    let intervalId
+    let heartbeatId
+    let lastGen = 0
 
     function connect() {
       if (!isMounted) return
@@ -39,16 +40,24 @@ export default function App() {
       socketRef.current = ws
 
       ws.onopen = () => {
-        intervalId = setInterval(() => {
+        // Heartbeat: send StatusCheck every 30s for connection health and
+        // self-correction if we miss a push.
+        heartbeatId = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ message: 'StatusCheck' }))
           }
-        }, 600)
+        }, 30000)
       }
 
       ws.onmessage = (ev) => {
         const msg = JSON.parse(ev.data)
         if (msg.message === 'StatusCheckResponse') {
+          // Self-correction: only apply if gen is newer than what we have.
+          if (msg.gen !== undefined && msg.gen <= lastGen) {
+            return
+          }
+          lastGen = msg.gen || 0
+
           setAppState({
             validated: true,
             playlists: msg.playlists ?? [],
@@ -59,7 +68,7 @@ export default function App() {
       }
 
       ws.onclose = () => {
-        clearInterval(intervalId)
+        clearInterval(heartbeatId)
         if (isMounted) {
           setTimeout(connect, 3000)
         }
@@ -74,7 +83,7 @@ export default function App() {
 
     return () => {
       isMounted = false
-      clearInterval(intervalId)
+      clearInterval(heartbeatId)
       if (socketRef.current) {
         socketRef.current.onclose = null
         socketRef.current.close()

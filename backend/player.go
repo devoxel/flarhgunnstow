@@ -102,6 +102,11 @@ type Player struct {
 	playerOn bool
 
 	exit chan struct{}
+
+	// onTrackChange is called (without holding p.Lock) whenever PlayLoop
+	// advances to a new track. The session uses this to broadcast state
+	// changes to WebSocket clients.
+	onTrackChange func()
 }
 
 func NewPlayer() *Player {

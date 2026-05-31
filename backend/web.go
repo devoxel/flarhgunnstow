@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -26,6 +27,11 @@ type wsMsg struct {
 	CurrentlyPlaying Track       `json:"playing"`
 	CurrentPlaylist  []Track     `json:"current_playlist,omitempty"`
 
+	// Push metadata: monotonically increasing generation counter and a
+	// compact SHA-256 prefix so the client can detect gaps / corruption.
+	Generation uint64 `json:"gen,omitempty"`
+	StateHash  string `json:"hash,omitempty"`
+
 	// MusicSelect
 	Title string `json:"title,omitempty"`
 
@@ -33,12 +39,9 @@ type wsMsg struct {
 	//  Empty.
 }
 
-func wsStatusCheck(ongoingSessions *SessionManager, id string, _ wsMsg) (wsMsg, error) {
-	st, err := ongoingSessions.GetState(id)
-	if err != nil {
-		return wsMsg{}, err
-	}
-
+// sessionSnapshot builds a full StatusCheckResponse from the current session
+// state. This is used both for heartbeat responses and push broadcasts.
+func sessionSnapshot(st *Session) (wsMsg, error) {
 	playing, playlist := st.Playing()
 	playlists := st.Playlists()
 
@@ -51,111 +54,133 @@ func wsStatusCheck(ongoingSessions *SessionManager, id string, _ wsMsg) (wsMsg, 
 	}, nil
 }
 
-func wsMusicSelect(ongoingSessions *SessionManager, id string, req wsMsg) error {
-	/* XXX: Eventually return to show errors to user.
-	return wsMsg{
-		Message "MusicSelectionResponse",
-	}
-	*/
-	return ongoingSessions.SetPlaylist(id, req.Title)
-}
-
-func wsMusicSkip(ongoingSessions *SessionManager, id string, _ wsMsg) error {
-	/* XXX: Eventually return to show errors to user.
-	return wsMsg{
-		Message "MusicSelectionResponse",
-	}
-	*/
-
-	gs, err := ongoingSessions.GetState(id)
+func writeMsg(c *websocket.Conn, msg wsMsg) error {
+	w, err := c.NextWriter(websocket.TextMessage)
 	if err != nil {
 		return err
 	}
-
-	gs.Skip()
+	if err := json.NewEncoder(w).Encode(msg); err != nil {
+		return err
+	}
 	return nil
 }
 
-func readLoop(c *websocket.Conn, id string, ongoingSessions *SessionManager) {
-	// it would be more clever to not create my own simplistic RPC protocol.
-	// here and instead use a proper RPC over websocket. but, YOLO.
-
-	// TODO: Remove polling in favour of non polling approach.
-	// TODO: Limit the amount of loops here to prevent ddos without a ticker.
-	t := time.NewTicker(500 * time.Millisecond)
-	defer c.Close()
-
-	for {
-		<-t.C
-
-		messageType, r, err := c.NextReader()
-		if err != nil {
-			log.Printf("readLoop: read error: %v", err)
-			c.Close()
-			return
-		}
-
-		if messageType != websocket.TextMessage {
-			log.Println("readLoop: bad message type")
-			c.Close()
-			return
-		}
-
-		var req wsMsg
-		d := json.NewDecoder(r)
-
-		if err = d.Decode(&req); err != nil {
-			log.Printf("readLoop: Decode: %v", err)
-			c.Close()
-			return
-		}
-
-		// The state of Validate will change when the discord bot is correctly
-		// validated. Shared state: a reliable system indeed!
-
-		var res wsMsg
-
-		switch req.Message {
-		case "StatusCheck":
-			res, err = wsStatusCheck(ongoingSessions, id, req)
-			if err != nil {
-				log.Printf("readLoop: StatusCheck: %v", err)
-				c.Close()
-				return
-			}
-		case "MusicSelect":
-			err = wsMusicSelect(ongoingSessions, id, req)
-			if err != nil {
-				log.Printf("readLoop: MusicSelect: %v", err)
-				c.Close()
-				return
-			}
-			continue
-		case "MusicSkip":
-			err = wsMusicSkip(ongoingSessions, id, req)
-			if err != nil {
-				log.Printf("readLoop: MusicSkip: %v", err)
-				c.Close()
-				return
-			}
-			continue
-		}
-
-		w, err := c.NextWriter(websocket.TextMessage)
-		if err != nil {
-			log.Printf("readLoop: NextWriter: %v", err)
-			c.Close()
-			return
-		}
-
-		e := json.NewEncoder(w)
-		if err = e.Encode(res); err != nil {
-			log.Printf("readLoop: Encode: %v", err)
-			c.Close()
-			return
-		}
-
+// serveSession handles a single WebSocket connection for the given session id.
+// It splits into two goroutines:
+//   - a read loop that processes incoming client messages
+//   - a write loop that subscribes to the session broadcaster for push updates
+//
+// The broadcaster pushes on every state change; the client sends StatusCheck
+// as a heartbeat every ~30s for connection health and self-correction.
+func serveSession(c *websocket.Conn, id string, sm *SessionManager) {
+	st, err := sm.GetState(id)
+	if err != nil {
+		log.Printf("serveSession: GetState(%s): %v", id, err)
+		c.Close()
+		return
 	}
+
+	// Subscribe to push broadcasts.
+	pushCh := st.Broadcaster().Subscribe()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Write loop: push updates from the broadcaster + initial snapshot.
+	go func() {
+		defer wg.Done()
+		defer func() {
+			st.Broadcaster().Unsubscribe(pushCh)
+			// Close the connection so the read loop also exits.
+			c.Close()
+		}()
+
+		// Send initial snapshot on connect.
+		snap, err := sessionSnapshot(st)
+		if err != nil {
+			log.Printf("serveSession: initial snapshot: %v", err)
+			return
+		}
+		if err := writeMsg(c, snap); err != nil {
+			return
+		}
+
+		for payload := range pushCh {
+			w, err := c.NextWriter(websocket.TextMessage)
+			if err != nil {
+				return
+			}
+			if _, err := w.Write(payload); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Read loop: process incoming client messages.
+	go func() {
+		defer wg.Done()
+		defer c.Close()
+
+		// Heartbeat ticker: send StatusCheck every 30s so the connection
+		// stays alive and the client can self-correct if it misses a push.
+		heartbeat := time.NewTicker(30 * time.Second)
+		defer heartbeat.Stop()
+
+		// Pump heartbeat ticks into a channel so we can select on them.
+		go func() {
+			for range heartbeat.C {
+				// Send a StatusCheck to our own handler via a synthetic
+				// local call — cheaper than going through the read path.
+				snap, err := sessionSnapshot(st)
+				if err != nil {
+					continue
+				}
+				if err := writeMsg(c, snap); err != nil {
+					return
+				}
+			}
+		}()
+
+		for {
+			messageType, r, err := c.NextReader()
+			if err != nil {
+				log.Printf("serveSession: read error: %v", err)
+				return
+			}
+
+			if messageType != websocket.TextMessage {
+				log.Println("serveSession: bad message type")
+				return
+			}
+
+			var req wsMsg
+			if err := json.NewDecoder(r).Decode(&req); err != nil {
+				log.Printf("serveSession: Decode: %v", err)
+				return
+			}
+
+			switch req.Message {
+			case "StatusCheck":
+				// Client is requesting a full state snapshot (heartbeat / self-correct).
+				snap, err := sessionSnapshot(st)
+				if err != nil {
+					log.Printf("serveSession: StatusCheck: %v", err)
+					return
+				}
+				if err := writeMsg(c, snap); err != nil {
+					return
+				}
+			case "MusicSelect":
+				st.SetPlaylist(req.Title)
+			case "MusicSkip":
+				st.Skip()
+			default:
+				log.Printf("serveSession: unknown message %q", req.Message)
+			}
+		}
+	}()
+
+	wg.Wait()
 }
 
 func websocketHandler(ongoingSessions *SessionManager) func(w http.ResponseWriter, r *http.Request) {
@@ -185,7 +210,7 @@ func websocketHandler(ongoingSessions *SessionManager) func(w http.ResponseWrite
 			return
 		}
 
-		readLoop(conn, id, ongoingSessions)
+		serveSession(conn, id, ongoingSessions)
 	}
 }
 

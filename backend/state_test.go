@@ -21,7 +21,7 @@ func newTestStore(t *testing.T) *Store {
 
 func TestStore_GuildIdempotent(t *testing.T) {
 	s := newTestStore(t)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := s.EnsureGuild("g1"); err != nil {
 			t.Fatalf("EnsureGuild %d: %v", i, err)
 		}
