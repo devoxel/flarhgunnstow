@@ -72,7 +72,8 @@ func (s *DiscordBot) handlePlay(e *events.MessageCreate, search string) {
 		return
 	}
 
-	track, err := gs.QueueSingle(search)
+	addedBy := e.Message.Author.Username
+	track, err := gs.QueueSingle(search, addedBy)
 	if err != nil {
 		s.sendErrorMsg(e, err)
 		return

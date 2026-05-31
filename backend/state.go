@@ -108,12 +108,12 @@ func (s *SessionManager) GetState(sID string) (*Session, error) {
 }
 
 // SetPlaylist is a convenience wrapper used by the WebSocket handler.
-func (s *SessionManager) SetPlaylist(id, title string) error {
+func (s *SessionManager) SetPlaylist(id, title string, addedBy string) error {
 	state, err := s.GetState(id)
 	if err != nil {
 		return err
 	}
-	state.SetPlaylist(title)
+	state.SetPlaylist(title, addedBy)
 	return nil
 }
 

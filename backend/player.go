@@ -150,8 +150,8 @@ func queueLocalFile(search string) (Track, error) {
 	return Track{}, fmt.Errorf("no local file found matching %q in %s", search, videoDir)
 }
 
-func (p *Player) QueueSingle(search string) (Track, error) {
-	log.Printf("QueueSingle: queueing %s", search)
+func (p *Player) QueueSingle(search string, addedBy string) (Track, error) {
+	log.Printf("QueueSingle: queueing %s (by %s)", search, addedBy)
 
 	// If search looks like an absolute path or a relative path to an existing
 	// file, treat it as a local file directly.
@@ -181,6 +181,8 @@ func (p *Player) QueueSingle(search string) (Track, error) {
 		}
 	}
 
+	track.AddedBy = addedBy
+
 	p.Lock()
 	if p.q == nil {
 		p.q = NewPlayerQ()
@@ -191,13 +193,20 @@ func (p *Player) QueueSingle(search string) (Track, error) {
 	return track, nil
 }
 
-func (p *Player) SetPlaylist(playlist *Playlist) error {
+func (p *Player) SetPlaylist(playlist *Playlist, addedBy string) error {
 	p.Lock()
+	defer p.Unlock()
+
+	// Tag every track with who selected the playlist.
+	tracks := make([]Track, len(playlist.Tracks))
+	copy(tracks, playlist.Tracks)
+	for i := range tracks {
+		tracks[i].AddedBy = addedBy
+	}
 
 	// Set current song to top of playlist.
-	p.q = NewPlayerQFromPlaylist(playlist.Tracks)
+	p.q = NewPlayerQFromPlaylist(tracks)
 
-	p.Unlock()
 	return nil
 }
 

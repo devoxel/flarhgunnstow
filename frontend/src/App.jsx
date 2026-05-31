@@ -3,6 +3,34 @@ import './App.css'
 import InvalidSession from './InvalidSession'
 import ValidSession from './ValidSession'
 
+// NamePrompt asks the user for a display name before entering the session.
+function NamePrompt({ onSubmit }) {
+  const [name, setName] = useState('')
+
+  const handleSubmit = (e) => {
+    e.preventDefault()
+    onSubmit(name.trim() || '')
+  }
+
+  return (
+    <div className="NamePrompt">
+      <h2>Who are you?</h2>
+      <p>Enter a display name so others can see who queued what.</p>
+      <form onSubmit={handleSubmit}>
+        <input
+          type="text"
+          placeholder="Your name..."
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          autoFocus
+          maxLength={32}
+        />
+        <button type="submit">Join</button>
+      </form>
+    </div>
+  )
+}
+
 export default function App() {
   const [appState, setAppState] = useState({
     validated: false,
@@ -10,7 +38,12 @@ export default function App() {
     playing: '',
     current_playlist: [],
   })
+  const [displayName, setDisplayName] = useState(() => {
+    return sessionStorage.getItem('flarhgunnstow_display_name') || ''
+  })
+  const [nameSubmitted, setNameSubmitted] = useState(false)
   const socketRef = useRef(null)
+  const nameRef = useRef(displayName)
 
   const send = useCallback((msg) => {
     if (socketRef.current?.readyState === WebSocket.OPEN) {
@@ -24,6 +57,16 @@ export default function App() {
 
   const handleSkip = useCallback(() => {
     send({ message: 'MusicSkip' })
+  }, [send])
+
+  const handleNameSubmit = useCallback((name) => {
+    const finalName = name || 'Anonymous'
+    sessionStorage.setItem('flarhgunnstow_display_name', finalName)
+    setDisplayName(finalName)
+    nameRef.current = finalName
+    setNameSubmitted(true)
+    // Will be sent when the WebSocket connects.
+    send({ message: 'SetName', display_name: finalName })
   }, [send])
 
   useEffect(() => {
@@ -40,6 +83,12 @@ export default function App() {
       socketRef.current = ws
 
       ws.onopen = () => {
+        // Send display name immediately on connect if we have one.
+        const name = nameRef.current
+        if (name) {
+          ws.send(JSON.stringify({ message: 'SetName', display_name: name }))
+        }
+
         // Heartbeat: send StatusCheck every 30s for connection health and
         // self-correction if we miss a push.
         heartbeatId = setInterval(() => {
@@ -79,6 +128,11 @@ export default function App() {
       }
     }
 
+    // If user already has a stored name, skip prompt.
+    if (displayName && !nameSubmitted) {
+      setNameSubmitted(true)
+    }
+
     connect()
 
     return () => {
@@ -90,6 +144,14 @@ export default function App() {
       }
     }
   }, [])
+
+  if (!nameSubmitted) {
+    return (
+      <div className="App">
+        <NamePrompt onSubmit={handleNameSubmit} />
+      </div>
+    )
+  }
 
   return (
     <div className="App">

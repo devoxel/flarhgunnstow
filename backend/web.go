@@ -1,12 +1,14 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +37,12 @@ type wsMsg struct {
 	// MusicSelect
 	Title string `json:"title,omitempty"`
 
+	// DisplayName indicates the users chosen name.
+	DisplayName string `json:"display_name,omitempty"`
+
+	// List of users who are in the session. map of userID -> displayName.
+	Users map[string]string `json:"users,omitempty"`
+
 	// MusicSkip
 	//  Empty.
 }
@@ -44,6 +52,8 @@ type wsMsg struct {
 func sessionSnapshot(st *Session) (wsMsg, error) {
 	playing, playlist := st.Playing()
 	playlists := st.Playlists()
+	users := st.Users()
+	fmt.Println(users)
 
 	return wsMsg{
 		Message:          "StatusCheckResponse",
@@ -51,6 +61,7 @@ func sessionSnapshot(st *Session) (wsMsg, error) {
 		Playlists:        playlists,
 		CurrentlyPlaying: playing,
 		CurrentPlaylist:  playlist,
+		Users:            users,
 	}, nil
 }
 
@@ -72,13 +83,16 @@ func writeMsg(c *websocket.Conn, msg wsMsg) error {
 //
 // The broadcaster pushes on every state change; the client sends StatusCheck
 // as a heartbeat every ~30s for connection health and self-correction.
-func serveSession(c *websocket.Conn, id string, sm *SessionManager) {
+func serveSession(c *websocket.Conn, id string, sm *SessionManager, userID string) {
 	st, err := sm.GetState(id)
 	if err != nil {
 		log.Printf("serveSession: GetState(%s): %v", id, err)
 		c.Close()
 		return
 	}
+
+	// Set name for attribution; client sends this after connecting.
+	displayName := userID
 
 	// Subscribe to push broadcasts.
 	pushCh := st.Broadcaster().Subscribe()
@@ -171,7 +185,12 @@ func serveSession(c *websocket.Conn, id string, sm *SessionManager) {
 					return
 				}
 			case "MusicSelect":
-				st.SetPlaylist(req.Title)
+				st.SetPlaylist(req.Title, displayName)
+			case "SetName":
+				if req.DisplayName != "" {
+					displayName = req.DisplayName
+				}
+				st.UserJoined(userID, displayName)
 			case "MusicSkip":
 				st.Skip()
 			default:
@@ -210,8 +229,26 @@ func websocketHandler(ongoingSessions *SessionManager) func(w http.ResponseWrite
 			return
 		}
 
-		serveSession(conn, id, ongoingSessions)
+		userID := hashIP(r)
+		serveSession(conn, id, ongoingSessions, userID)
 	}
+}
+
+// hashIP returns a stable, anonymized ID derived from the client's IP. It is
+// not cryptographically reversible and is used as a per-connection identity so
+// the server can attribute actions (queue additions, playlist selections) to
+// the same user across reconnects without storing IP addresses.
+func hashIP(r *http.Request) string {
+	ip := r.Header.Get("X-Forwarded-For")
+	if ip == "" {
+		ip = r.RemoteAddr
+	}
+	// Strip port if present.
+	if colon := strings.LastIndex(ip, ":"); colon != -1 {
+		ip = ip[:colon]
+	}
+	h := sha256.Sum256([]byte(ip))
+	return fmt.Sprintf("%x", h[:8]) // 16 hex chars
 }
 
 func handlerInit(ongoingSessions *SessionManager) {

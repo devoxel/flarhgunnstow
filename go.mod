@@ -6,9 +6,9 @@ require (
 	github.com/disgoorg/disgo v0.19.3
 	github.com/disgoorg/godave/golibdave v0.1.0
 	github.com/disgoorg/snowflake/v2 v2.0.3
-	github.com/google/go-cmp v0.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/jonas747/ogg v0.0.0-20161220051205-b4f6f4cf3757
+	modernc.org/sqlite v1.34.2
 )
 
 require (
@@ -30,7 +30,6 @@ require (
 	modernc.org/libc v1.55.3 // indirect
 	modernc.org/mathutil v1.6.0 // indirect
 	modernc.org/memory v1.8.0 // indirect
-	modernc.org/sqlite v1.34.2 // indirect
 	modernc.org/strutil v1.2.0 // indirect
 	modernc.org/token v1.1.0 // indirect
 )

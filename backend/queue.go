@@ -20,6 +20,7 @@ type Track struct {
 	Uploader string `json:"uploader,omitempty"`
 	URL      string `json:"url,omitempty"`
 	Path     string `json:"path,omitempty"`
+	AddedBy  string `json:"added_by,omitempty"`
 }
 
 func (t Track) Equal(o Track) bool {

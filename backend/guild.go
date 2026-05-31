@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
+	"maps"
 	"sync"
 
 	"github.com/disgoorg/disgo/voice"
@@ -27,6 +29,7 @@ type Session struct {
 	msg       func(msg string) error
 	joinVoice func() (voice.Conn, error)
 	p         *Player
+	users     map[string]string
 
 	broadcaster *SessionBroadcaster
 }
@@ -34,13 +37,14 @@ type Session struct {
 func newSession(store *Store, guildID string) *Session {
 	return &Session{
 		guildID:     guildID,
+		users:       map[string]string{},
 		store:       store,
 		p:           NewPlayer(),
 		broadcaster: NewSessionBroadcaster(),
 	}
 }
 
-func (gs *Session) SetPlaylist(title string) {
+func (gs *Session) SetPlaylist(title string, addedBy string) {
 	gs.Lock()
 	pl, err := gs.store.LoadPlaylistByTitle(gs.guildID, title)
 	if err == ErrPlaylistNotFound {
@@ -55,7 +59,7 @@ func (gs *Session) SetPlaylist(title string) {
 		return
 	}
 
-	if err := gs.p.SetPlaylist(pl); err != nil {
+	if err := gs.p.SetPlaylist(pl, addedBy); err != nil {
 		gs.Unlock()
 		log.Printf("SetPlaylist: set: %v", err)
 		gs.msg(fmt.Sprintf("Couldn't set your playlist: %v", err))
@@ -69,13 +73,13 @@ func (gs *Session) SetPlaylist(title string) {
 	gs.broadcastStateChange()
 }
 
-func (gs *Session) QueueSingle(search string) (Track, error) {
+func (gs *Session) QueueSingle(search string, addedBy string) (Track, error) {
 	gs.Lock()
-	track, err := gs.p.QueueSingle(search)
+	track, err := gs.p.QueueSingle(search, addedBy)
 	if err != nil {
 		gs.Unlock()
-		log.Printf("QueueSingle(%s) error: %v", search, err)
-		gs.msg(fmt.Sprintf("Oops! Flargunnstow failed at the modest task that was his charge. Debug: %#v", err))
+		slog.Error("QueueSingle", "search", search, "err", err)
+		gs.msg(fmt.Sprintf("flargunnstow failed at the modest task that was his charge: debug: %#v", err))
 		return Track{}, err
 	}
 	gs.p.Start(gs.msg, gs.joinVoice)
@@ -126,6 +130,22 @@ func (gs *Session) AddPlaylist(p *Playlist) error {
 		return err
 	}
 	return gs.store.SavePlaylist(gs.guildID, p)
+}
+
+func (gs *Session) Users() map[string]string {
+	// copy here might be overly cautious - we could may skip if perf gets slow with large sessions.
+	users := make(map[string]string, len(gs.users))
+	gs.Lock()
+	maps.Copy(users, gs.users)
+	gs.Unlock()
+	return users
+}
+
+func (gs *Session) UserJoined(id, name string) {
+	gs.Lock()
+	gs.users[id] = name
+	gs.Unlock()
+	gs.broadcastStateChange()
 }
 
 // RemovePlaylist deletes a playlist by title. Returns

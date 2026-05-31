@@ -11,6 +11,9 @@ function Player({ playing, current_playlist, handleSkip }) {
         <span className="Player-Name">{playing.name}&nbsp;</span>
         <span className="Player-Sep"> - </span>
         <span className="Player-Artist">{playing.artist}</span>
+        {playing.added_by && (
+          <span className="Player-AddedBy"> (queued by {playing.added_by})</span>
+        )}
       </div>
 
       <button type="button" className="Player-SkipButton" onClick={handleSkip}>
@@ -32,6 +35,9 @@ function Player({ playing, current_playlist, handleSkip }) {
                 <span className="Player-TrackName">{track.name}&nbsp;</span>
                 <span className="Player-TrackSep"> - </span>
                 <span className="Player-TrackArtist">{track.artist}</span>
+                {track.added_by && (
+                  <span className="Player-TrackAddedBy"> (queued by {track.added_by})</span>
+                )}
               </div>
             ))}
           </div>

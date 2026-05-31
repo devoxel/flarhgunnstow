@@ -67,17 +67,15 @@ var (
 )
 
 // builtinDefaults is the minimal default playlist set shipped with the bot.
-// It is inserted into default_playlists on first run. Future curation flows
-// through SQL (or the web UI), not this slice. Keep it tiny — anything
-// substantive belongs in user data, not in the binary.
+// TODO: replace with actual SQL directly.
 var builtinDefaults = []Playlist{
 	{
-		Title:    "Sample",
-		Category: "Sample",
+		Title:    "Bangers",
+		Category: "example",
 		Tracks: []Track{
 			{
-				Name: "Sample Track",
-				URL:  "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+				Name: "Aquatic Ambiance",
+				Path: "sample.opus",
 			},
 		},
 	},
@@ -96,8 +94,7 @@ type Store struct {
 }
 
 // NewStore opens (or creates) the SQLite database at path, applies the schema,
-// and seeds default playlists from the embedded sample.json on first use. WAL
-// mode is enabled for concurrent reader-friendly behaviour.
+// and seeds default playlists. WAL mode is enabled for concurrent reader behaviour.
 //
 // Pass ":memory:" or "file::memory:?cache=shared" for an in-memory DB (tests).
 func NewStore(path string) (*Store, error) {
@@ -139,9 +136,8 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// seedDefaults populates the default_* tables from the embedded sample.json,
-// once per Store lifetime. It is idempotent at the row level (INSERT OR
-// IGNORE) so calling it against a populated DB is a no-op.
+// seedDefaults populates the default_* tables once per Store lifetime.
+// It is idempotent at the row level (INSERT OR IGNORE) so calling it against a populated DB is a no-op.
 func (s *Store) seedDefaults() error {
 	s.seedOnce.Do(func() {
 		s.seedErr = s.doSeedDefaults()
